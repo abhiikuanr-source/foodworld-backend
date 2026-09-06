@@ -1,20 +1,8 @@
 // api/delete-user.js
-const admin = require('firebase-admin');
-
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
-    }),
-    databaseURL: process.env.FIREBASE_DATABASE_URL
-  });
-}
+const admin = require('../firebaseAdmin');
 
 module.exports = async (req, res) => {
-  // CORS Headers
-  res.setHeader('Access-Control-Allow-Credentials', true);
+  // 1. Clean CORS Headers (Works with Netlify & Mobile Browsers)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -22,7 +10,7 @@ module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
 
-  const { uid, role } = req.body;
+  const { uid, role } = req.body || {};
   if (!uid) return res.status(400).json({ error: 'Missing uid' });
 
   try {
@@ -37,16 +25,17 @@ module.exports = async (req, res) => {
       updates[`deviceTokens/riders/${uid}`] = null;
     } else if (role === 'customer') {
       updates[`customers/${uid}`] = null;
+      updates[`deviceTokens/customers/${uid}`] = null;
     }
 
     // 1. Realtime Database से पूरा डेटा हटाएं
     await db.ref().update(updates);
 
-    // 2. Firebase Authentication से लॉगिन खाता हमेशा के लिए खत्म करें (ईमेल फ्री हो जाएगा)
+    // 2. Firebase Authentication से खाता हटाएं (ईमेल दोबारा इस्तेमाल हो सकेगा)
     try {
       await admin.auth().deleteUser(uid);
     } catch (authErr) {
-      console.log("Auth delete note:", authErr.message);
+      console.log("Auth delete note (already deleted or not in auth):", authErr.message);
     }
 
     return res.status(200).json({ 
