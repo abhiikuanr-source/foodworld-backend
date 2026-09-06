@@ -1,8 +1,7 @@
-// api/delete-user.js
 const admin = require('../firebaseAdmin');
 
 module.exports = async (req, res) => {
-  // 1. Clean CORS Headers (Works with Netlify & Mobile Browsers)
+  // 1. CORS Headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -28,19 +27,19 @@ module.exports = async (req, res) => {
       updates[`deviceTokens/customers/${uid}`] = null;
     }
 
-    // 1. Realtime Database से पूरा डेटा हटाएं
+    // 1. Delete from Realtime Database
     await db.ref().update(updates);
 
-    // 2. Firebase Authentication से खाता हटाएं (ईमेल दोबारा इस्तेमाल हो सकेगा)
+    // 2. Delete login account from Firebase Authentication
     try {
       await admin.auth().deleteUser(uid);
     } catch (authErr) {
-      console.log("Auth delete note (already deleted or not in auth):", authErr.message);
+      console.log("Auth delete note:", authErr.message);
     }
 
     return res.status(200).json({ 
       success: true, 
-      message: `User ${uid} completely deleted from Database and Authentication.` 
+      message: `User ${uid} completely deleted.` 
     });
   } catch (err) {
     console.error("Delete user error:", err);
