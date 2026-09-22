@@ -23,11 +23,11 @@ module.exports = async (req, res) => {
   try {
     const db = admin.database();
 
-    // 1. Restaurant owner ka token fetch karein (Server-side)
+    // 1. Restaurant owner ka token fetch karein
     const restTokenSnap = await db.ref(`deviceTokens/restaurants/${restaurantId}/fcmToken`).once('value');
     const restToken = restTokenSnap.val();
 
-    // 2. Active online riders ke tokens fetch karein (Server-side)
+    // 2. Active online riders ke tokens fetch karein
     const ridersSnap = await db.ref('deviceTokens/riders').once('value');
     const ridersData = ridersSnap.val() || {};
     const riderTokens = [];
@@ -40,32 +40,73 @@ module.exports = async (req, res) => {
 
     const messages = [];
 
-    // Kitchen ko notification
+    // =========================================================
+    // 🍳 1. KITCHEN KO HIGH-PRIORITY PUSH (DOZE MODE BYPASS)
+    // =========================================================
     if (restToken) {
       messages.push(admin.messaging().send({
         token: restToken,
         notification: {
-          title: "🔴 New Order Received!",
+          title: "🚨 NAYA KITCHEN ORDER AAYA!",
           body: `Order #${orderId.slice(-6)} received. Amount: ₹${totalAmount}`
         },
-        data: { orderId }
+        // 🌟 Android Deep Sleep / 15-30 Min Doze Mode Bypass Payload:
+        android: {
+          priority: "high",
+          ttl: 60 * 1000, // 60 seconds
+          notification: {
+            channelId: "fw_kitchen_siren_v4", // Kitchen app me banaya gaya channel
+            sound: "kitchen_siren",
+            defaultSound: true,
+            defaultVibrateTimings: true,
+            priority: "max",
+            visibility: "public"
+          }
+        },
+        // 🌟 Background WebView/JS ko jagane ke liye Data Payload:
+        data: {
+          orderId: String(orderId),
+          type: "NEW_ORDER",
+          sound: "kitchen_siren",
+          amount: String(totalAmount || "0")
+        }
       }));
     }
 
-    // Riders ko notification
+    // =========================================================
+    // 🛵 2. RIDERS KO HIGH-PRIORITY BROADCAST PUSH
+    // =========================================================
     if (riderTokens.length > 0) {
       messages.push(admin.messaging().sendEachForMulticast({
         tokens: riderTokens,
         notification: {
-          title: "⚡ New Delivery Task Nearby!",
-          body: `New order available to accept. Earn ₹${totalAmount}`
+          title: "⚡ NAYA DELIVERY TASK!",
+          body: `Order #${orderId.slice(-6)} available nearby. Earn: ₹${totalAmount}`
         },
-        data: { orderId }
+        // 🌟 Android High Priority Payload:
+        android: {
+          priority: "high",
+          ttl: 60 * 1000,
+          notification: {
+            channelId: "fw_rider_siren_v4", // Rider app me banaya gaya channel
+            sound: "default",
+            defaultSound: true,
+            defaultVibrateTimings: true,
+            priority: "max",
+            visibility: "public"
+          }
+        },
+        data: {
+          orderId: String(orderId),
+          type: "NEW_TASK",
+          sound: "kitchen_siren",
+          amount: String(totalAmount || "0")
+        }
       }));
     }
 
     await Promise.all(messages);
-    return res.status(200).json({ success: true, message: 'Push dispatched securely from server' });
+    return res.status(200).json({ success: true, message: 'High-priority push dispatched successfully' });
 
   } catch (error) {
     console.error("Push Error:", error);
