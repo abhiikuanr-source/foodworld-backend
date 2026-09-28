@@ -18,7 +18,6 @@ if (!admin.apps.length) {
 }
 
 module.exports = async (req, res) => {
-  // CORS Headers allow karein
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
@@ -29,40 +28,61 @@ module.exports = async (req, res) => {
 
   const { orderId, restaurantId, totalAmount } = req.body || {};
   if (!orderId || !restaurantId) {
-    console.warn("Push Trigger Rejected: Missing orderId or restaurantId", req.body);
     return res.status(400).json({ error: 'Missing orderId or restaurantId' });
   }
 
   console.log(`\n==================================================`);
-  console.log(`[ORDER PUSH TRIGGERED] Order #${String(orderId).slice(-6)} | Kitchen: ${restaurantId} | Amount: ₹${totalAmount}`);
+  console.log(`[ORDER PUSH] Order #${String(orderId).slice(-6)} | Kitchen: ${restaurantId} | Amount: ₹${totalAmount}`);
 
   try {
     const db = admin.database();
+    const dispatchPromises = [];
 
     // =========================================================
-    // 🍳 1. KITCHEN TOKEN DHOONDHEIN (WITH SAFE FALLBACK)
+    // 🍳 1. KITCHEN TOKEN DHOONDHEIN AUR PUSH BHEJEIN
     // =========================================================
-    let restToken = null;
     const restTokenSnap = await db.ref(`deviceTokens/restaurants/${restaurantId}/fcmToken`).once('value');
-    restToken = restTokenSnap.val();
+    let restToken = restTokenSnap.val();
 
-    // Fallback: Agar token direct node par save ho
     if (!restToken || typeof restToken !== 'string') {
       const directSnap = await db.ref(`deviceTokens/restaurants/${restaurantId}`).once('value');
       const directVal = directSnap.val();
       if (typeof directVal === 'string') restToken = directVal;
-      else if (directVal && typeof directVal.fcmToken === 'string') restToken = directVal.fcmToken;
+      else if (directVal && directVal.fcmToken) restToken = directVal.fcmToken;
     }
 
     if (restToken && typeof restToken === 'string' && restToken.trim().length > 10) {
-      console.log(`✅ Kitchen Token Found: ${restToken.slice(0, 15)}...`);
-    } else {
-      console.warn(`❌ Kitchen Token NOT FOUND for restaurant: ${restaurantId}`);
-      restToken = null;
+      dispatchPromises.push(
+        admin.messaging().send({
+          token: restToken.trim(),
+          notification: {
+            title: "🚨 NAYA KITCHEN ORDER AAYA!",
+            body: `Order #${String(orderId).slice(-6)} received. Amount: ₹${totalAmount}`
+          },
+          android: {
+            priority: "high",
+            ttl: 60 * 1000,
+            notification: {
+              channelId: "fw_kitchen_siren_v4",
+              sound: "kitchen_siren",
+              defaultSound: true,
+              defaultVibrateTimings: true,
+              priority: "max",
+              visibility: "public"
+            }
+          },
+          data: {
+            orderId: String(orderId),
+            type: "NEW_ORDER",
+            amount: String(totalAmount || "0")
+          }
+        }).then(() => console.log("✅ Kitchen FCM Sent"))
+          .catch(err => console.error("❌ Kitchen FCM Failed:", err.message))
+      );
     }
 
     // =========================================================
-    // 🛵 2. ACTIVE RIDERS KE TOKENS DHOONDHEIN
+    // 🛵 2. ACTIVE ONLINE RIDERS KO MULTICAST PUSH BHEJEIN
     // =========================================================
     const ridersSnap = await db.ref('deviceTokens/riders').once('value');
     const ridersData = ridersSnap.val() || {};
@@ -71,123 +91,96 @@ module.exports = async (req, res) => {
     Object.keys(ridersData).forEach(uid => {
       const rider = ridersData[uid];
       if (!rider) return;
-
-      // 🌟 Safe Check: Boolean true ho ya string "true", dono chalenge
       const isOnline = (rider.online === true || rider.online === 'true' || rider.online === 1);
       const token = rider.fcmToken || (typeof rider === 'string' ? rider : null);
-
       if (isOnline && token && typeof token === 'string' && token.trim().length > 10) {
         riderTokens.push(token.trim());
       }
     });
 
-    const uniqueRiderTokens = [...new Set(riderTokens)]; // Duplicates remove karein
-    console.log(`🛵 Online Rider Tokens Found: ${uniqueRiderTokens.length}`);
-
-    // =========================================================
-    // 🚀 3. HIGH-PRIORITY FCM PUSH DISPATCH
-    // =========================================================
-    const dispatchPromises = [];
-    let kitchenDispatched = false;
-    let ridersDispatchedCount = 0;
-
-    // Kitchen Notification Send
-    if (restToken) {
-      const kitchenMessage = {
-        token: restToken,
-        notification: {
-          title: "🚨 NAYA KITCHEN ORDER AAYA!",
-          body: `Order #${String(orderId).slice(-6)} received. Amount: ₹${totalAmount}`
-        },
-        android: {
-          priority: "high",
-          ttl: 60 * 1000,
-          notification: {
-            channelId: "fw_kitchen_siren_v4",
-            sound: "kitchen_siren",
-            defaultSound: true,
-            defaultVibrateTimings: true,
-            priority: "max",
-            visibility: "public"
-          }
-        },
-        data: {
-          orderId: String(orderId),
-          type: "NEW_ORDER",
-          sound: "kitchen_siren",
-          amount: String(totalAmount || "0")
-        }
-      };
-
-      dispatchPromises.push(
-        admin.messaging().send(kitchenMessage)
-          .then(resId => {
-            console.log("✅ Kitchen FCM Dispatched Successfully:", resId);
-            kitchenDispatched = true;
-          })
-          .catch(err => {
-            console.error("❌ Kitchen FCM Send Failed:", err.message);
-            // Agar token expire ho gaya ho toh database se clean karein
-            if (err.code === 'messaging/registration-token-not-registered') {
-              db.ref(`deviceTokens/restaurants/${restaurantId}`).remove().catch(() => {});
-            }
-          })
-      );
-    }
-
-    // Riders Notification Multicast Send
+    const uniqueRiderTokens = [...new Set(riderTokens)];
     if (uniqueRiderTokens.length > 0) {
-      const riderMessage = {
-        tokens: uniqueRiderTokens,
-        notification: {
-          title: "⚡ NAYA DELIVERY TASK!",
-          body: `Order #${String(orderId).slice(-6)} available nearby. Earn: ₹${totalAmount}`
-        },
-        android: {
-          priority: "high",
-          ttl: 60 * 1000,
-          notification: {
-            channelId: "fw_rider_siren_v4",
-            sound: "default",
-            defaultSound: true,
-            defaultVibrateTimings: true,
-            priority: "max",
-            visibility: "public"
-          }
-        },
-        data: {
-          orderId: String(orderId),
-          type: "NEW_TASK",
-          sound: "kitchen_siren",
-          amount: String(totalAmount || "0")
-        }
-      };
-
       dispatchPromises.push(
-        admin.messaging().sendEachForMulticast(riderMessage)
-          .then(batchRes => {
-            console.log(`✅ Riders Multicast Sent: ${batchRes.successCount} Success, ${batchRes.failureCount} Failed`);
-            ridersDispatchedCount = batchRes.successCount;
-          })
-          .catch(err => {
-            console.error("❌ Riders Multicast Failed:", err.message);
-          })
+        admin.messaging().sendEachForMulticast({
+          tokens: uniqueRiderTokens,
+          notification: {
+            title: "⚡ NAYA DELIVERY TASK!",
+            body: `Order #${String(orderId).slice(-6)} nearby available. Amount: ₹${totalAmount}`
+          },
+          android: {
+            priority: "high",
+            ttl: 60 * 1000,
+            notification: {
+              channelId: "fw_rider_siren_v4",
+              sound: "default",
+              defaultSound: true,
+              defaultVibrateTimings: true,
+              priority: "max",
+              visibility: "public"
+            }
+          },
+          data: {
+            orderId: String(orderId),
+            type: "NEW_TASK",
+            amount: String(totalAmount || "0")
+          }
+        }).then(res => console.log(`✅ Riders Multicast Sent: ${res.successCount} Success`))
+          .catch(err => console.error("❌ Riders Multicast Failed:", err.message))
       );
     }
 
-    // Dono messages complete hone ka wait karein
+    // =========================================================
+    // 🛡️ 3. 🌟 SUPER ADMIN KO EMERGENCY PUSH BHEJEIN
+    // =========================================================
+    const adminSnap = await db.ref('deviceTokens/admins').once('value');
+    const adminData = adminSnap.val() || {};
+    const adminTokens = [];
+
+    Object.keys(adminData).forEach(uid => {
+      const token = adminData[uid]?.fcmToken || (typeof adminData[uid] === 'string' ? adminData[uid] : null);
+      if (token && typeof token === 'string' && token.trim().length > 10) {
+        adminTokens.push(token.trim());
+      }
+    });
+
+    const uniqueAdminTokens = [...new Set(adminTokens)];
+    if (uniqueAdminTokens.length > 0) {
+      dispatchPromises.push(
+        admin.messaging().sendEachForMulticast({
+          tokens: uniqueAdminTokens,
+          notification: {
+            title: "🚨 ADMIN RADAR: NAYA ORDER AAYA!",
+            body: `Order #${String(orderId).slice(-6)} received. Amount: ₹${totalAmount}`
+          },
+          android: {
+            priority: "high",
+            ttl: 60 * 1000,
+            notification: {
+              channelId: "fw_admin_orders_v3",
+              sound: "default",
+              defaultSound: true,
+              defaultVibrateTimings: true,
+              priority: "max",
+              visibility: "public"
+            }
+          },
+          data: {
+            orderId: String(orderId),
+            type: "ADMIN_RADAR_ALERT",
+            amount: String(totalAmount || "0")
+          }
+        }).then(res => console.log(`✅ Admin Multicast Sent: ${res.successCount} Success`))
+          .catch(err => console.error("❌ Admin Multicast Failed:", err.message))
+      );
+    }
+
     await Promise.allSettled(dispatchPromises);
     console.log(`==================================================\n`);
 
-    return res.status(200).json({
-      success: true,
-      kitchenPushed: kitchenDispatched,
-      ridersPushedCount: ridersDispatchedCount,
-      summary: `Kitchen: ${kitchenDispatched ? 'Sent' : 'Skipped/Failed'}, Riders: ${ridersDispatchedCount}`
-    });
+    return res.status(200).json({ success: true, message: 'All target pushes processed' });
 
   } catch (error) {
-    console.error("Fatal Push Error:", error);
+    console.error("Push Error:", error);
     return res.status(500).json({ error: error.message });
   }
 };
