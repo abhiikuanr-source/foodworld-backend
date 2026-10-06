@@ -1,34 +1,20 @@
 // api/send-order-push.js
-const admin = require('firebase-admin');
-
-if (!admin.apps.length) {
-  try {
-    admin.initializeApp({
-      credential: admin.credential.cert({
-        projectId: process.env.FIREBASE_PROJECT_ID,
-        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
-      }),
-      databaseURL: process.env.FIREBASE_DATABASE_URL
-    });
-    console.log("Firebase Admin Initialized Successfully");
-  } catch (initErr) {
-    console.error("Firebase Admin Init Error:", initErr.message);
-  }
-}
+const admin = require('../firebaseAdmin'); // Root ke central admin instance ko use karein
 
 module.exports = async (req, res) => {
-  res.setHeader('Access-Control-Allow-Credentials', true);
+  // 1. Clean & Standard CORS Headers
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
-  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+  if (req.method !== 'POST') {
+    return res.status(405).json({ success: false, error: 'Method Not Allowed' });
+  }
 
   const { orderId, restaurantId, totalAmount } = req.body || {};
   if (!orderId || !restaurantId) {
-    return res.status(400).json({ error: 'Missing orderId or restaurantId' });
+    return res.status(400).json({ success: false, error: 'Missing orderId or restaurantId' });
   }
 
   console.log(`\n==================================================`);
@@ -130,7 +116,7 @@ module.exports = async (req, res) => {
     }
 
     // =========================================================
-    // 🛡️ 3. 🌟 SUPER ADMIN KO EMERGENCY PUSH BHEJEIN
+    // 🛡️ 3. SUPER ADMIN KO EMERGENCY RADAR PUSH BHEJEIN
     // =========================================================
     const adminSnap = await db.ref('deviceTokens/admins').once('value');
     const adminData = adminSnap.val() || {};
@@ -174,6 +160,7 @@ module.exports = async (req, res) => {
       );
     }
 
+    // Saare pushes parallel run honge aur kisi ek ke fail hone par doosra nahi rukega
     await Promise.allSettled(dispatchPromises);
     console.log(`==================================================\n`);
 
@@ -181,6 +168,6 @@ module.exports = async (req, res) => {
 
   } catch (error) {
     console.error("Push Error:", error);
-    return res.status(500).json({ error: error.message });
+    return res.status(500).json({ success: false, error: error.message });
   }
 };
